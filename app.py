@@ -4,10 +4,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
-import hashlib
 from scipy.stats import norm
 
-# Import our modules
 from data_manager import DataManager
 from cgf_estimator import CGFEstimator
 from saddlepoint import var_from_saddlepoint
@@ -15,7 +13,6 @@ from config import UNIVERSES, ACTIVE_UNIVERSE, VAR_ALPHAS, ROLLING_WINDOW, START
 
 st.set_page_config(page_title="Saddlepoint VaR Engine", layout="wide")
 
-# Cache expensive operations
 @st.cache_resource
 def get_data_manager():
     return DataManager()
@@ -24,20 +21,17 @@ def get_data_manager():
 def compute_portfolio_returns(universe_key):
     dm = get_data_manager()
     tickers = UNIVERSES[universe_key]
-    # Filter available tickers
     available = [t for t in tickers if t in dm.df.columns]
     if not available:
         return None, None
     prices = dm.df[available].ffill().bfill()
     rets = prices.pct_change().dropna()
-    # Equal weight portfolio
     weights = np.ones(len(available)) / len(available)
     port_ret = rets.dot(weights)
     return port_ret, available
 
 @st.cache_data(ttl=3600)
 def compute_rolling_var(returns, window=252, alphas=[0.01, 0.025, 0.05]):
-    """Compute rolling VaR using saddlepoint approximation."""
     dates = returns.index
     n = len(returns)
     results = []
@@ -75,10 +69,9 @@ def compute_etf_stats(universe_key):
         r = rets[t].dropna()
         if len(r) < 2:
             continue
-        mean = r.mean() * 252  # annualized
+        mean = r.mean() * 252          # annualized
         vol = r.std() * np.sqrt(252)
         sharpe = mean / vol if vol > 0 else 0
-        # Empirical 99% VaR
         var99 = -np.percentile(r, 1)
         stats.append({
             "Ticker": t,
@@ -87,7 +80,7 @@ def compute_etf_stats(universe_key):
             "Sharpe Ratio": sharpe,
             "99% Daily VaR (%)": var99 * 100
         })
-    df_stats = pd.DataFrame(stats).sort_values("Sharpe Ratio", ascending=False)
+    df_stats = pd.DataFrame(stats).sort_values("Annual Return (%)", ascending=False)
     return df_stats
 
 def plot_portfolio_var(var_df, universe_name):
@@ -108,7 +101,6 @@ def main():
     st.title("📊 Saddlepoint Approximation Engine")
     st.markdown("Lugannani-Rice saddlepoint VaR for ETF portfolios")
 
-    # Sidebar
     st.sidebar.header("Configuration")
     selected_universe = st.sidebar.selectbox(
         "Select Universe",
@@ -117,7 +109,6 @@ def main():
     )
     rolling_window = st.sidebar.slider("Rolling Window (days)", 126, 504, ROLLING_WINDOW, step=63)
 
-    # Load data
     with st.spinner("Loading data..."):
         port_ret, tickers = compute_portfolio_returns(selected_universe)
         if port_ret is None:
@@ -126,13 +117,11 @@ def main():
         var_df = compute_rolling_var(port_ret, window=rolling_window, alphas=VAR_ALPHAS)
         etf_stats = compute_etf_stats(selected_universe)
 
-    # Main tabs
     tab1, tab2, tab3 = st.tabs(["📈 Portfolio VaR", "🏆 Top ETFs", "📋 Full Universe"])
 
     with tab1:
         st.plotly_chart(plot_portfolio_var(var_df, selected_universe), use_container_width=True)
 
-        # Violation metrics
         cols = st.columns(len(VAR_ALPHAS))
         for i, alpha in enumerate(VAR_ALPHAS):
             col = f"violation_{int(alpha*100)}"
@@ -147,7 +136,7 @@ def main():
             )
 
     with tab2:
-        st.subheader(f"Top 3 ETFs in {selected_universe}")
+        st.subheader(f"Top 3 ETFs in {selected_universe} (by Annual Return)")
         top3 = etf_stats.head(3)
         if not top3.empty:
             st.dataframe(top3.style.format({
@@ -157,12 +146,12 @@ def main():
                 "99% Daily VaR (%)": "{:.2f}"
             }), use_container_width=True)
 
-        # Bar chart of Sharpe ratios
-        fig = px.bar(etf_stats.head(10), x="Ticker", y="Sharpe Ratio", title="Sharpe Ratio (Top 10)")
+        # Bar chart: top 10 by return
+        fig = px.bar(etf_stats.head(10), x="Ticker", y="Annual Return (%)", title="Top 10 ETFs by Annual Return")
         st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
-        st.subheader(f"All ETFs in {selected_universe} ({len(etf_stats)} assets)")
+        st.subheader(f"All ETFs in {selected_universe} (sorted by Annual Return)")
         st.dataframe(etf_stats.style.format({
             "Annual Return (%)": "{:.2f}",
             "Annual Volatility (%)": "{:.2f}",
@@ -170,7 +159,6 @@ def main():
             "99% Daily VaR (%)": "{:.2f}"
         }), use_container_width=True)
 
-    # Footer
     st.markdown("---")
     st.caption(f"Data from {START_DATE or '2008'} to {END_DATE or 'latest'} | Rolling window: {rolling_window} days | VaR levels: {VAR_ALPHAS}")
 
