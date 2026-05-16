@@ -22,6 +22,7 @@ def upload_results(df_dict: dict, run_id: str = None):
         except Exception as e:
             print(f"Repo creation notice: {e}")
         
+        # Upload folder without unsupported argument
         upload_folder(
             folder_path=local_path,
             repo_id=HF_OUTPUT_REPO,
