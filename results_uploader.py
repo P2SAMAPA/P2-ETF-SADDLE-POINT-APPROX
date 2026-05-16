@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 from datetime import datetime
-from huggingface_hub import HfApi, Repository
+from huggingface_hub import HfApi, upload_folder
 from config import OUTPUT_REPO, HF_TOKEN, LOCAL_RESULTS_DIR
 
 def upload_results(df_dict: dict, run_id: str = None):
@@ -19,19 +19,24 @@ def upload_results(df_dict: dict, run_id: str = None):
         if df is not None:
             df.to_parquet(os.path.join(local_path, f"{name}.parquet"))
     
-    # Upload to HF
+    # Upload to HF using modern API
     if HF_TOKEN:
         api = HfApi()
         # Ensure repo exists
         try:
             api.create_repo(repo_id=OUTPUT_REPO, token=HF_TOKEN, exist_ok=True)
-        except:
-            pass
-        repo = Repository(local_dir=LOCAL_RESULTS_DIR, clone_from=OUTPUT_REPO, use_auth_token=HF_TOKEN)
-        repo.git_pull()
-        repo.git_add()
-        repo.git_commit(f"Add results {run_id}")
-        repo.git_push()
+        except Exception as e:
+            print(f"Repo creation notice: {e}")
+        
+        # Upload entire folder (this replaces git-based Repository)
+        upload_folder(
+            folder_path=local_path,
+            repo_id=OUTPUT_REPO,
+            token=HF_TOKEN,
+            repo_type="dataset",
+            path_in_repo=run_id,   # will be e.g. "20250321_143000/"
+            ignore_errors=True,
+        )
         print(f"Uploaded to {OUTPUT_REPO}/tree/main/{run_id}")
     else:
         print("HF_TOKEN not set, results saved locally only")
