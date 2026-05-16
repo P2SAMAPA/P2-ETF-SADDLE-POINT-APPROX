@@ -21,8 +21,33 @@ class DataManager:
         ds = load_dataset(DATA_REPO, split="train", token=HF_TOKEN if HF_TOKEN else None)
         df = ds.to_pandas()
         
-        # Ensure date column is datetime
-        df["date"] = pd.to_datetime(df["date"])
+        # Print columns for debugging (optional, but helpful)
+        print("Available columns:", df.columns.tolist())
+        
+        # Detect date column
+        date_col = None
+        for candidate in ['date', 'Date', 'timestamp', 'time', 'ds', 'datetime', 'DATE']:
+            if candidate in df.columns:
+                date_col = candidate
+                break
+        
+        if date_col is None:
+            # If no date column, check if index is datetime
+            if not isinstance(df.index, pd.DatetimeIndex):
+                # Try to infer index as datetime
+                try:
+                    df.index = pd.to_datetime(df.index)
+                except:
+                    raise ValueError("No date column found and index cannot be converted to datetime.")
+            # Set a dummy date_col to avoid errors later
+            date_col = 'index'
+            df[date_col] = df.index
+        else:
+            df[date_col] = pd.to_datetime(df[date_col])
+        
+        # Rename to standard 'date' for internal use
+        df.rename(columns={date_col: 'date'}, inplace=True)
+        
         df = df.sort_values("date")
         
         # Filter date range
@@ -38,11 +63,11 @@ class DataManager:
         self.etf_returns = df[["date"] + etf_cols].copy()
         self.macro = df[["date"] + macro_cols].copy()
         
-        # Fill missing values (forward fill, then back fill)
+        # Fill missing values
         self.etf_returns = self.etf_returns.fillna(method="ffill").fillna(method="bfill")
         self.macro = self.macro.fillna(method="ffill").fillna(method="bfill")
         
-        # Compute daily returns for ETFs (if not already present)
+        # Compute daily returns for ETFs if not already present
         for col in etf_cols:
             if col in self.etf_returns.columns and not col.endswith("_ret"):
                 self.etf_returns[f"{col}_ret"] = self.etf_returns[col].pct_change()
@@ -55,20 +80,17 @@ class DataManager:
         rets = self.etf_returns[["date"] + etf_ret_cols].copy()
         
         if weights is None:
-            # Equal weight
             w = np.ones(len(etf_ret_cols)) / len(etf_ret_cols)
         else:
             w = np.array(weights)
             assert len(w) == len(etf_ret_cols), "Weights length mismatch"
         
-        # Align dates and drop NaNs (first day of returns)
         rets = rets.dropna()
         portfolio_ret = rets[etf_ret_cols].dot(w)
         portfolio_ret.index = rets["date"]
         return portfolio_ret
     
     def get_macro_series(self) -> pd.DataFrame:
-        """Return macro dataframe with date index."""
         macro_df = self.macro.set_index("date")
         return macro_df
     
