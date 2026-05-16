@@ -3,47 +3,44 @@ import pandas as pd
 import plotly.graph_objects as go
 from huggingface_hub import HfApi, hf_hub_download
 import os
+import re
 from config import HF_OUTPUT_REPO, UNIVERSES, ACTIVE_UNIVERSE, VAR_ALPHAS, HF_TOKEN
 
 st.set_page_config(layout="wide")
 st.title("📈 Saddlepoint Approximation Engine – VaR Dashboard")
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def get_latest_run_folder():
-    """Return the name of the most recent run subfolder in the HF repo."""
+    """Get the most recent timestamped run folder from the HF dataset."""
+    if not HF_TOKEN:
+        return None
     api = HfApi()
     try:
-        # List all files in the repo (recursively) to get top-level directories
-        files = api.list_repo_files(repo_id=HF_OUTPUT_REPO, repo_type="dataset", token=HF_TOKEN if HF_TOKEN else None)
-        # Find all top-level directories that match timestamp pattern YYYYMMDD_HHMMSS
-        # They will appear as e.g., "20250321_143000/var_forecasts.parquet"
-        dirs = set()
+        # List all files in the dataset
+        files = api.list_repo_files(repo_id=HF_OUTPUT_REPO, repo_type="dataset", token=HF_TOKEN)
+        # Extract folder names that look like YYYYMMDD_HHMMSS
+        run_folders = set()
         for f in files:
-            if '/' in f:
-                dir_name = f.split('/')[0]
-                # Check if dir_name looks like timestamp
-                if len(dir_name) == 15 and dir_name[4] == dir_name[7] == '_' and dir_name[8:10].isdigit():
-                    dirs.add(dir_name)
-        if not dirs:
+            match = re.match(r"(\d{8}_\d{6})/", f)
+            if match:
+                run_folders.add(match.group(1))
+        if not run_folders:
             return None
-        # Sort descending (latest first)
-        latest = sorted(dirs, reverse=True)[0]
+        # Sort descending and take the latest
+        latest = sorted(run_folders, reverse=True)[0]
         return latest
     except Exception as e:
         st.warning(f"Could not list repo files: {e}")
         return None
 
 @st.cache_data
-def load_latest_results():
-    """Download the most recent var_forecasts and backtest_stats parquet files."""
-    latest_run = get_latest_run_folder()
-    if latest_run is None:
-        return None, None
+def load_results(run_folder):
+    """Download parquet files from a specific run folder."""
     try:
         var_df = pd.read_parquet(
             hf_hub_download(
                 repo_id=HF_OUTPUT_REPO,
-                filename=f"{latest_run}/var_forecasts.parquet",
+                filename=f"{run_folder}/var_forecasts.parquet",
                 repo_type="dataset",
                 token=HF_TOKEN if HF_TOKEN else None
             )
@@ -51,19 +48,27 @@ def load_latest_results():
         stats_df = pd.read_parquet(
             hf_hub_download(
                 repo_id=HF_OUTPUT_REPO,
-                filename=f"{latest_run}/backtest_stats.parquet",
+                filename=f"{run_folder}/backtest_stats.parquet",
                 repo_type="dataset",
                 token=HF_TOKEN if HF_TOKEN else None
             )
         )
         return var_df, stats_df
     except Exception as e:
-        st.warning(f"Could not load results from HF: {e}")
+        st.warning(f"Could not load results from {run_folder}: {e}")
         return None, None
 
 def main():
     st.subheader(f"Universe: {ACTIVE_UNIVERSE} – {len(UNIVERSES[ACTIVE_UNIVERSE])} ETFs")
-    var_df, stats_df = load_latest_results()
+    
+    latest_run = get_latest_run_folder()
+    if latest_run is None:
+        st.info("No results found in the HF repository. Please run the backtest script first.")
+        return
+    
+    st.write(f"Loading results from run: `{latest_run}`")
+    var_df, stats_df = load_results(latest_run)
+    
     if var_df is None:
         st.info("No results loaded. Run the backtest script first.")
         return
