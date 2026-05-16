@@ -1,99 +1,178 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import plotly.express as px
 import plotly.graph_objects as go
-from huggingface_hub import HfApi, hf_hub_download
-import os
-import re
-from config import HF_OUTPUT_REPO, UNIVERSES, ACTIVE_UNIVERSE, VAR_ALPHAS, HF_TOKEN
+from datetime import datetime
+import hashlib
+from scipy.stats import norm
 
-st.set_page_config(layout="wide")
-st.title("📈 Saddlepoint Approximation Engine – VaR Dashboard")
+# Import our modules
+from data_manager import DataManager
+from cgf_estimator import CGFEstimator
+from saddlepoint import var_from_saddlepoint
+from config import UNIVERSES, ACTIVE_UNIVERSE, VAR_ALPHAS, ROLLING_WINDOW, START_DATE, END_DATE
+
+st.set_page_config(page_title="Saddlepoint VaR Engine", layout="wide")
+
+# Cache expensive operations
+@st.cache_resource
+def get_data_manager():
+    return DataManager()
 
 @st.cache_data(ttl=3600)
-def get_latest_run_folder():
-    """Get the most recent timestamped run folder from the HF dataset."""
-    if not HF_TOKEN:
-        return None
-    api = HfApi()
-    try:
-        # List all files in the dataset
-        files = api.list_repo_files(repo_id=HF_OUTPUT_REPO, repo_type="dataset", token=HF_TOKEN)
-        # Extract folder names that look like YYYYMMDD_HHMMSS
-        run_folders = set()
-        for f in files:
-            match = re.match(r"(\d{8}_\d{6})/", f)
-            if match:
-                run_folders.add(match.group(1))
-        if not run_folders:
-            return None
-        # Sort descending and take the latest
-        latest = sorted(run_folders, reverse=True)[0]
-        return latest
-    except Exception as e:
-        st.warning(f"Could not list repo files: {e}")
-        return None
-
-@st.cache_data
-def load_results(run_folder):
-    """Download parquet files from a specific run folder."""
-    try:
-        var_df = pd.read_parquet(
-            hf_hub_download(
-                repo_id=HF_OUTPUT_REPO,
-                filename=f"{run_folder}/var_forecasts.parquet",
-                repo_type="dataset",
-                token=HF_TOKEN if HF_TOKEN else None
-            )
-        )
-        stats_df = pd.read_parquet(
-            hf_hub_download(
-                repo_id=HF_OUTPUT_REPO,
-                filename=f"{run_folder}/backtest_stats.parquet",
-                repo_type="dataset",
-                token=HF_TOKEN if HF_TOKEN else None
-            )
-        )
-        return var_df, stats_df
-    except Exception as e:
-        st.warning(f"Could not load results from {run_folder}: {e}")
+def compute_portfolio_returns(universe_key):
+    dm = get_data_manager()
+    tickers = UNIVERSES[universe_key]
+    # Filter available tickers
+    available = [t for t in tickers if t in dm.df.columns]
+    if not available:
         return None, None
+    prices = dm.df[available].ffill().bfill()
+    rets = prices.pct_change().dropna()
+    # Equal weight portfolio
+    weights = np.ones(len(available)) / len(available)
+    port_ret = rets.dot(weights)
+    return port_ret, available
 
-def main():
-    st.subheader(f"Universe: {ACTIVE_UNIVERSE} – {len(UNIVERSES[ACTIVE_UNIVERSE])} ETFs")
-    
-    latest_run = get_latest_run_folder()
-    if latest_run is None:
-        st.info("No results found in the HF repository. Please run the backtest script first.")
-        return
-    
-    st.write(f"Loading results from run: `{latest_run}`")
-    var_df, stats_df = load_results(latest_run)
-    
-    if var_df is None:
-        st.info("No results loaded. Run the backtest script first.")
-        return
+@st.cache_data(ttl=3600)
+def compute_rolling_var(returns, window=252, alphas=[0.01, 0.025, 0.05]):
+    """Compute rolling VaR using saddlepoint approximation."""
+    dates = returns.index
+    n = len(returns)
+    results = []
+    for i in range(window, n):
+        train = returns.iloc[i-window:i].values
+        if len(train) < 250:
+            var_vals = {f"VaR_{int(a*100)}": -np.percentile(train, a*100) for a in alphas}
+        else:
+            cgf = CGFEstimator(train, ridge=1e-6)
+            var_vals = {}
+            for a in alphas:
+                var_vals[f"VaR_{int(a*100)}"] = var_from_saddlepoint(cgf, alpha=a, max_iter=50)
+        results.append({
+            "date": dates[i],
+            "actual_return": returns.iloc[i],
+            **var_vals
+        })
+    df = pd.DataFrame(results).set_index("date")
+    for a in alphas:
+        col = f"VaR_{int(a*100)}"
+        df[f"violation_{int(a*100)}"] = (df["actual_return"] < -df[col]).astype(int)
+    return df
 
-    st.subheader("VaR Forecasts vs Actual Returns")
+@st.cache_data(ttl=3600)
+def compute_etf_stats(universe_key):
+    dm = get_data_manager()
+    tickers = UNIVERSES[universe_key]
+    available = [t for t in tickers if t in dm.df.columns]
+    if not available:
+        return pd.DataFrame()
+    prices = dm.df[available].ffill().bfill()
+    rets = prices.pct_change().dropna()
+    stats = []
+    for t in available:
+        r = rets[t].dropna()
+        if len(r) < 2:
+            continue
+        mean = r.mean() * 252  # annualized
+        vol = r.std() * np.sqrt(252)
+        sharpe = mean / vol if vol > 0 else 0
+        # Empirical 99% VaR
+        var99 = -np.percentile(r, 1)
+        stats.append({
+            "Ticker": t,
+            "Annual Return (%)": mean * 100,
+            "Annual Volatility (%)": vol * 100,
+            "Sharpe Ratio": sharpe,
+            "99% Daily VaR (%)": var99 * 100
+        })
+    df_stats = pd.DataFrame(stats).sort_values("Sharpe Ratio", ascending=False)
+    return df_stats
+
+def plot_portfolio_var(var_df, universe_name):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=var_df.index, y=var_df["actual_return"], mode='lines', name='Actual Return'))
+    fig.add_trace(go.Scatter(x=var_df.index, y=var_df["actual_return"]*100, mode='lines', name='Portfolio Return (%)'))
     for alpha in VAR_ALPHAS:
         col = f"VaR_{int(alpha*100)}"
-        if col in var_df.columns:
-            fig.add_trace(go.Scatter(x=var_df.index, y=-var_df[col], mode='lines', name=f'{int(alpha*100)}% VaR'))
-    fig.update_layout(yaxis_title="Return", xaxis_title="Date")
-    st.plotly_chart(fig, use_container_width=True)
+        fig.add_trace(go.Scatter(x=var_df.index, y=-var_df[col]*100, mode='lines', name=f'{int(alpha*100)}% VaR (%)'))
+    fig.update_layout(
+        title=f"Portfolio VaR – {universe_name}",
+        xaxis_title="Date",
+        yaxis_title="Percent",
+        hovermode="x unified"
+    )
+    return fig
 
-    st.subheader("Violations")
-    for alpha in VAR_ALPHAS:
-        col = f"violation_{int(alpha*100)}"
-        if col in var_df.columns:
-            vcount = var_df[col].sum()
-            rate = vcount / len(var_df) * 100
-            st.metric(f"{int(alpha*100)}% VaR violations", vcount, delta=f"{rate:.2f}% rate")
+def main():
+    st.title("📊 Saddlepoint Approximation Engine")
+    st.markdown("Lugannani-Rice saddlepoint VaR for ETF portfolios")
 
-    if stats_df is not None:
-        st.subheader("Kupiec Backtest")
-        st.dataframe(stats_df)
+    # Sidebar
+    st.sidebar.header("Configuration")
+    selected_universe = st.sidebar.selectbox(
+        "Select Universe",
+        list(UNIVERSES.keys()),
+        index=list(UNIVERSES.keys()).index(ACTIVE_UNIVERSE)
+    )
+    rolling_window = st.sidebar.slider("Rolling Window (days)", 126, 504, ROLLING_WINDOW, step=63)
+
+    # Load data
+    with st.spinner("Loading data..."):
+        port_ret, tickers = compute_portfolio_returns(selected_universe)
+        if port_ret is None:
+            st.error(f"No data available for universe {selected_universe}")
+            return
+        var_df = compute_rolling_var(port_ret, window=rolling_window, alphas=VAR_ALPHAS)
+        etf_stats = compute_etf_stats(selected_universe)
+
+    # Main tabs
+    tab1, tab2, tab3 = st.tabs(["📈 Portfolio VaR", "🏆 Top ETFs", "📋 Full Universe"])
+
+    with tab1:
+        st.plotly_chart(plot_portfolio_var(var_df, selected_universe), use_container_width=True)
+
+        # Violation metrics
+        cols = st.columns(len(VAR_ALPHAS))
+        for i, alpha in enumerate(VAR_ALPHAS):
+            col = f"violation_{int(alpha*100)}"
+            violations = var_df[col].sum()
+            total = len(var_df)
+            rate = violations / total
+            expected = alpha
+            cols[i].metric(
+                f"{int(alpha*100)}% VaR",
+                f"{violations} violations",
+                delta=f"{rate*100:.2f}% (exp. {expected*100:.1f}%)"
+            )
+
+    with tab2:
+        st.subheader(f"Top 3 ETFs in {selected_universe}")
+        top3 = etf_stats.head(3)
+        if not top3.empty:
+            st.dataframe(top3.style.format({
+                "Annual Return (%)": "{:.2f}",
+                "Annual Volatility (%)": "{:.2f}",
+                "Sharpe Ratio": "{:.3f}",
+                "99% Daily VaR (%)": "{:.2f}"
+            }), use_container_width=True)
+
+        # Bar chart of Sharpe ratios
+        fig = px.bar(etf_stats.head(10), x="Ticker", y="Sharpe Ratio", title="Sharpe Ratio (Top 10)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab3:
+        st.subheader(f"All ETFs in {selected_universe} ({len(etf_stats)} assets)")
+        st.dataframe(etf_stats.style.format({
+            "Annual Return (%)": "{:.2f}",
+            "Annual Volatility (%)": "{:.2f}",
+            "Sharpe Ratio": "{:.3f}",
+            "99% Daily VaR (%)": "{:.2f}"
+        }), use_container_width=True)
+
+    # Footer
+    st.markdown("---")
+    st.caption(f"Data from {START_DATE or '2008'} to {END_DATE or 'latest'} | Rolling window: {rolling_window} days | VaR levels: {VAR_ALPHAS}")
 
 if __name__ == "__main__":
     main()
