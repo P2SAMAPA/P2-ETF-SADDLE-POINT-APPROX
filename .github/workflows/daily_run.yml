@@ -2,7 +2,7 @@ name: Daily VaR Update
 
 on:
   schedule:
-    - cron: '0 20 * * 1-5'  # 8 PM UTC on weekdays
+    - cron: '0 02 * * 1-6'  # 8 PM UTC on weekdays
   workflow_dispatch:
 
 jobs:
