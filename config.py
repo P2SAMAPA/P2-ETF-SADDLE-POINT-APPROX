@@ -14,7 +14,7 @@ HF_OUTPUT_REPO = "P2SAMAPA/p2-etf-saddle-point-approx-results"
 FI_COMMODITIES_TICKERS = ["TLT", "VCIT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
 EQUITY_SECTORS_TICKERS = [
     "SPY", "QQQ", "XLK", "XLF", "XLE", "XLV",
-    "XLI", "XLY", "XLP", "XLU", "GDX", "XME",
+    "XLI", "XLY", "XLP", "XLU", "GDX", "XME", "SMH", "SOXX",
     "IWF", "XSD", "XBI", "IWM", "IWD"
 ]
 ALL_TICKERS = list(set(FI_COMMODITIES_TICKERS + EQUITY_SECTORS_TICKERS))
